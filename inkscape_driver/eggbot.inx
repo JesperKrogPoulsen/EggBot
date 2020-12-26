@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
   <_name>EggBot Control</_name>
-  <id>command.evilmadscientist.eggbot.rev275b1</id>
+  <id>command.evilmadscientist.eggbot.rev280b1</id>
   <dependency type="extension">org.inkscape.output.svg.inkscape</dependency>
   <dependency type="executable" location="extensions">eggbot.py</dependency>
   <dependency type="executable" location="extensions">inkex.py</dependency>
@@ -83,8 +83,6 @@ _gui-text="Reverse motion of Motor 1 (pen)">true</param>
 _gui-text="Reverse motion of Motor 2 (egg)">true</param> 
 <param indent="1" name="wraparound" type="boolean"
 _gui-text="Egg (x) axis wraps around">true</param>
-<param indent="1" name="startCentered" type="boolean"
-_gui-text="Start with pen centered">true</param>	
 <param indent="1" name="returnToHome" type="boolean"
 _gui-text="Return home when done">true</param> 
 <param indent="1" name="engraving" type="boolean"
@@ -119,6 +117,7 @@ check the circuit board (EBB) firmware version.
 	<_option value="enable-engraver"  >Engraver On</_option>
 	<_option value="disable-engraver" >Engraver Off</_option>
 	<_option value="version-check"  >Check EBB Version</_option>
+	<_option value="strip-data"     >Strip plotter data from file</_option>
       </param>
 
       <param name="WalkDistance" type="int" min="-32000" max="32000" 
@@ -173,16 +172,20 @@ selected number, which can be up to 100.
       <_param name="instructions_general" type="description"
 	      xml:space="preserve">
 EggBot Control Inkscape extension 
-Release 2.7.5, dated 2016-05-01
+Release 2.8.1, dated 2019-06-19
 
-*EBB Firmware 1.96 or newer required for certain
- functions. 
+* EBB Firmware 2.5.1 or newer is recommended.
 
 Known issues:
 * "Cancel" function does not work while plotting.
   (This is due to a known bug in Inkscape; the
    "cancel" button does not work with any
    Inkscape extension, including this one.)
+   
+Latest version and issue tracker available at:
+https://github.com/evil-mad/EggBot/
+
+
 </_param>
     </page>
   </param>

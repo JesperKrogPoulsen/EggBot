@@ -84,6 +84,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <delays.h>
+#include <flash.h>
 #include "Usb\usb.h"
 #include "Usb\usb_function_cdc.h"
 #include "usb_config.h"
@@ -91,21 +92,26 @@
 #include "UBW.h"
 #include "ebb.h"
 #if defined(BOARD_EBB_V11) || defined(BOARD_EBB_V12) || defined(BOARD_EBB_V13_AND_ABOVE)
-	#include "RCServo2.h"
+  #include "RCServo2.h"
 #endif
 
 /** D E F I N E S ********************************************************/
 
-#define kUSART_TX_BUF_SIZE		10				// In bytes
-#define kUSART_RX_BUF_SIZE		10				// In bytes
+#define kUSART_TX_BUF_SIZE    10                // In bytes
+#define kUSART_RX_BUF_SIZE    10                // In bytes
 
-#define kISR_FIFO_A_DEPTH		3
-#define kISR_FIFO_D_DEPTH		3
-#define kPR4_RELOAD				250		// For 1ms TMR4 tick
-#define kCR						0x0D
-#define kLF						0x0A
+#define kISR_FIFO_A_DEPTH     3
+#define kISR_FIFO_D_DEPTH     3
+#define kPR4_RELOAD           250               // For 1ms TMR4 tick
+#define kCR                   0x0D
+#define kLF                   0x0A
 
-#define ANALOG_INITATE_MS_BETWEEN_STARTS 5     // Number of ms between analog converts (all enabled channels)
+#define ANALOG_INITATE_MS_BETWEEN_STARTS 5      // Number of ms between analog converts (all enabled channels)
+
+#define FLASH_NAME_ADDRESS      0xF800          // Starting address in FLASH where we store our EBB's name
+#define FLASH_NAME_LENGTH       16              // Size of store for EBB's name in FLASH
+
+#define RCSERVO_POWEROFF_DEFAULT_MS (60ul*1000ul)  // Number of milliseconds to default the RCServo power autotimeout (5min)
 
 /** V A R I A B L E S ********************************************************/
 //#pragma udata access fast_vars
@@ -152,7 +158,7 @@ const rom char st_LFCR[] = {"\r\n"};
 #elif defined(BOARD_EBB_V12)
 	const rom char st_version[] = {"EBBv12 EB Firmware Version 2.2.1\r\n"};
 #elif defined(BOARD_EBB_V13_AND_ABOVE)
-	const rom char st_version[] = {"EBBv13_and_above EB Firmware Version 2.4.0\r\n"};
+	const rom char st_version[] = {"EBBv13_and_above EB Firmware Version 2.7.0\r\n"};
 #elif defined(BOARD_UBW)
 	const rom char st_version[] = {"UBW EB Firmware Version 2.2.1\r\n"};
 #endif
@@ -205,7 +211,7 @@ unsigned char g_USART_RX_buf_out;
 unsigned char g_USART_TX_buf_in;
 unsigned char g_USART_TX_buf_out;
 
-// Normally set to TRUE. Able to set FALSE to not send "OK" message after packet recepetion
+// Normally set to TRUE. Able to set FALSE to not send "OK" message after packet reception
 BOOL	g_ack_enable;
 
 // Set to TRUE to turn Pulse Mode on
@@ -216,6 +222,10 @@ unsigned int gPulseLen[4] = {0,0,0,0};
 unsigned int gPulseRate[4] = {0,0,0,0};
 // For Pulse Mode, counters keeping track of where we are
 unsigned int gPulseCounters[4] = {0,0,0,0};
+
+// Counts down milliseconds until zero. At zero shuts off power to RC servo (via RA3))
+volatile UINT32 gRCServoPoweroffCounterMS = 0;
+volatile UINT32 gRCServoPoweroffCounterReloadMS = RCSERVO_POWEROFF_DEFAULT_MS;
 
 /** P R I V A T E  P R O T O T Y P E S ***************************************/
 void BlinkUSBStatus (void);		// Handles blinking the USB status LED
@@ -244,7 +254,6 @@ void parse_BS_packet (void);	// BS sends binary data to fast parallel output
 void parse_CU_packet (void);	// CU configures UBW (system wide parameters)
 void parse_SS_packet (void);	// SS Send SPI
 void parse_RS_packet (void);	// RS Receive SPI
-void parse_CS_packet (void);	// CS Configure SPI
 void parse_SI_packet (void);	// SI Send I2C
 void parse_RI_packet (void);	// RI Receive I2C
 void parse_CI_packet (void);	// CI Configure I2C
@@ -254,6 +263,11 @@ void parse_BL_packet (void);	// BL Boot Load command
 void parse_CK_packet (void);	// CK ChecK command
 void parse_MR_packet (void);	// MR Motors Run command
 void parse_AC_packet (void);    // AC Analog Configure
+void parse_ST_packet (void);    // ST Set Tag command
+void parse_QT_packet (void);    // QT Query Tag command
+void parse_RB_packet (void);    // RB ReBoot command
+void parse_QR_packet (void);    // QR Query RC Servo power state
+void parse_SR_packet (void);    // SR Set RC Servo power timeout
 void check_and_send_TX_data (void); // See if there is any data to send to PC, and if so, do it
 int _user_putc (char c);		// Our UBS based stream character printer
 
@@ -273,7 +287,7 @@ void low_ISR(void)
 		PIR3bits.TMR4IF = 0;
 		
 		// Handle RC servo pulse generation (for next pulse/channel)
-		// Always incriment the gRCServo2msCounter
+		// Always increment the gRCServo2msCounter
         gRC2msCounter++;
 
         if (gRC2msCounter >= gRC2SlotMS)
@@ -359,7 +373,7 @@ void low_ISR(void)
                 // Turn TIMER3 back on
                 T3CONbits.TMR3ON = 1;
 
-                // Renable interrupts
+                // Re-enable interrupts
                 INTCONbits.GIEH = 1;
             }
         }
@@ -447,7 +461,7 @@ void low_ISR(void)
                 // Reset AnalogInitiate counter
                 AnalogInitiate = 0;
             }
-            // Otherwise, incriment each 1ms
+            // Otherwise, increment each 1ms
             else
             {
                 AnalogInitiate++;
@@ -483,11 +497,11 @@ void low_ISR(void)
 						if (i==3) PORTBbits.RB3 = 0;
 					}
 
-					// Now incriment the counter
+					// Now increment the counter
 					gPulseCounters[i]++;
 
 					// And check to see if we've reached the end of the rate
-					if (gPulseCounters[i] == gPulseRate[i])
+					if (gPulseCounters[i] >= gPulseRate[i])
 					{
 						// If so, start over from zero
 						gPulseCounters[i] = 0;
@@ -508,7 +522,18 @@ void low_ISR(void)
 		if (QC_ms_timer)
 		{
 			QC_ms_timer--;
-		}	
+		}
+        
+        // Software timer for RCServo power control
+        if (gRCServoPoweroffCounterMS)
+        {
+            gRCServoPoweroffCounterMS--;
+            // If we just timed out, then shut off RC Servo power
+            if (gRCServoPoweroffCounterMS == 0)
+            {
+                RCServoPowerIO = RCSERVO_POWER_OFF;
+            }
+        }
 
 	} // end of 1ms interrupt
 
@@ -606,7 +631,7 @@ void low_ISR(void)
 
 void UserInit(void)
 {
-	char i, j;
+	int  i, j;
 
 	// Make all of 3 digital inputs
 	LATA = 0x00;
@@ -685,12 +710,25 @@ void UserInit(void)
     	ISR_A_FIFO[i] = 0;
 	}	
 
-    // Inialize USB TX and RX buffer management
+    // Initialize USB TX and RX buffer management
     g_RX_buf_in = 0;
     g_RX_buf_out = 0;
 	g_TX_buf_in = 0;
 	g_TX_buf_out = 0;
 
+    for (i=0; i < kTX_BUF_SIZE; i++)
+    {
+        g_TX_buf[i] = 0;
+    }
+    for (i=0; i < kRX_COMMAND_BUF_SIZE; i++)
+    {
+        g_RX_command_buf[i] = 0;
+    }
+    for (i=0; i < kRX_BUF_SIZE; i++)
+    {
+        g_RX_buf[i] = 0;
+    }
+    
 	// And the USART TX and RX buffer management
 	g_USART_RX_buf_in = 0;
 	g_USART_RX_buf_out = 0;
@@ -746,6 +784,10 @@ void UserInit(void)
 
 	// Turn on the Timer4
 	T4CONbits.TMR4ON = 1; 
+    
+    // If there's a name in FLASH for us, copy it over to the USB Device
+    // descriptor before we enumerate
+    populateDeviceStringWithName();
 }//end UserInit
 
 /******************************************************************************
@@ -1119,6 +1161,18 @@ void parse_packet(void)
 	// Now 'command' is equal to one or two bytes of our command
 	switch (command)
 	{
+		case ('L' * 256) + 'T':
+		{
+			// Low Level Timed Move
+			parse_LT_packet();
+			break;
+		}
+		case ('L' * 256) + 'M':
+		{
+			// Low Level Move
+			parse_LM_packet();
+			break;
+		}
 		case ('R' * 256) + 'X':
 		{
 			// For receiving serial
@@ -1252,12 +1306,6 @@ void parse_packet(void)
 			parse_RS_packet ();
 			break;
 		}
-		case ('C' * 256) + 'S':
-		{
-			// CS for Configure SPI
-			parse_CS_packet ();
-			break;
-		}
 		case ('S' * 256) + 'I':
 		{
 			// SI for Send I2C
@@ -1292,12 +1340,6 @@ void parse_packet(void)
 		{
 			// SM for stepper motor
 			parse_SM_packet ();
-			break;
-		}
-		case ('A' * 256) + 'M':
-		{
-			// AM for Accelerated Motion
-			parse_AM_packet ();
 			break;
 		}
 		case ('S' * 256) + 'P':
@@ -1390,6 +1432,12 @@ void parse_packet(void)
 			parse_QC_packet();
 			break;
 		}
+		case ('Q' * 256) + 'G':
+		{
+			// QG for Query General
+			parse_QG_packet();
+			break;
+		}
 		case ('S' * 256) + 'E':
 		{
 			// SE for Set Engraver
@@ -1432,6 +1480,54 @@ void parse_packet(void)
 		{
 			// XM for X motor move
 			parse_XM_packet();
+			break;
+		}
+		case ('Q' * 256) + 'S':
+		{
+			// QP for Query Step position
+			parse_QS_packet();
+			break;
+		}
+		case ('C' * 256) + 'S':
+		{
+			// CS for Clear Step position
+			parse_CS_packet();
+			break;
+		}
+		case ('S' * 256) + 'T':
+		{
+			// ST for Set Tag
+			parse_ST_packet();
+			break;
+		}
+		case ('Q' * 256) + 'T':
+		{
+			// QT for Query Tag
+			parse_QT_packet();
+			break;
+		}
+		case ('R' * 256) + 'B':
+		{
+			// RB for ReBoot
+			parse_RB_packet();
+			break;
+		}
+		case ('Q' * 256) + 'R':
+		{
+			// QR is for Query RC Servo power state
+			parse_QR_packet();
+			break;
+		}
+		case ('S' * 256) + 'R':
+		{
+			// SR is for Set RC Servo power timeout
+			parse_SR_packet();
+			break;
+		}
+		case ('H' * 256) + 'M':
+		{
+			// HM is for Home Motor
+			parse_HM_packet();
 			break;
 		}
 		default:
@@ -1479,7 +1575,7 @@ void parse_packet(void)
 	g_RX_buf_out = g_RX_buf_in;
 }
 
-// Print out the positive acknowledgement that the packet was received
+// Print out the positive acknowledgment that the packet was received
 // if we have acks turned on.
 void print_ack(void)
 {
@@ -2090,7 +2186,7 @@ void parse_PI_packet(void)
 
 	extract_number (kUCASE_ASCII_CHAR, &port, kREQUIRED);
 	extract_number (kUCHAR, &pin, kREQUIRED);
-
+    
 	// Bail if we got a conversion error
 	if (error_byte)
 	{
@@ -2742,13 +2838,6 @@ void parse_RS_packet (void)
 
 }	
 
-// CS Configure SPI
-void parse_CS_packet (void)
-{
-	print_ack ();
-
-}	
-
 // SI Send I2C
 void parse_SI_packet (void)
 {
@@ -2846,7 +2935,7 @@ void parse_PG_packet (void)
 		gPulsesOn = FALSE;
 	}
 
-	print_ack ();
+	print_ack();
 }	
 
 void LongDelay(void)
@@ -2886,6 +2975,78 @@ void parse_BL_packet()
 	_asm goto 0x00001E _endasm
 }
 
+// RB ReBoot command : simply jump to the reset vector
+// Example: "RB<CR>"
+void parse_RB_packet()
+{
+	// First, kill interrupts though
+    INTCONbits.GIEH = 0;	// Turn high priority interrupts on
+    INTCONbits.GIEL = 0;	// Turn low priority interrupts on
+
+	UCONbits.SUSPND = 0;		//Disable USB module
+	UCON = 0x00;				//Disable USB module
+	//And wait awhile for the USB cable capacitance to discharge down to disconnected (SE0) state. 
+	//Otherwise host might not realize we disconnected/reconnected when we do the reset.
+	LongDelay();
+    Reset();
+}
+
+// QR Query RC Servo power state command
+// Example: "RR<CR>"
+// Returns "0<CR><LF>OK<CR><LF>" or "1<CR><LF>OK<CR><LF>" 
+// 0 = power to RC servo off
+// 1 = power to RC servo on
+void parse_QR_packet()
+{
+  	printf ((far rom char *)"%1u\r\n", RCServoPowerIO_PORT);
+    print_ack();
+}
+
+// SR Set RC Servo power timeout
+// Example: "SR,<new_time_ms>,<new_power_state><CR><LF>"
+// Returns "OK<CR><LF>"
+// <new_time_ms> is a 32-bit unsigned integer, representing the new RC servo 
+// poweroff timeout in milliseconds. This value is not saved across reboots.
+// It is the length of time the system will wait after any command that uses
+// the motors or servo before killing power to the RC servo.
+// Use a value of 0 for <new_time_ms> to completely disable the poweroff timer.
+// <new_power_state> is an optional parameter of either 0 or 1. It will
+// immediately affect the servo's power state, where 0 turns it off and 1 
+// turns it on.
+void parse_SR_packet(void)
+{
+  unsigned long Value;
+  UINT8 State;
+  ExtractReturnType GotState;
+
+  extract_number(kULONG, &Value, kREQUIRED);
+  GotState = extract_number(kUCHAR, &State, kOPTIONAL);
+
+  // Bail if we got a conversion error
+  if (error_byte)
+  {
+    return;
+  }
+
+    gRCServoPoweroffCounterReloadMS = Value;
+    
+    // Check to see if <new_power_state> is there
+    if (GotState == kEXTRACT_OK)
+    {
+        // Yup, so set new power state
+        if (State)
+        {
+            RCServoPowerIO = RCSERVO_POWER_ON;
+        }
+        else
+        {
+            RCServoPowerIO = RCSERVO_POWER_OFF;
+        }
+    }
+    
+    print_ack();
+}
+
 // Just used for testing/debugging the packet parsing routines
 void parse_CK_packet()
 {
@@ -2919,13 +3080,174 @@ void parse_CK_packet()
 	print_ack();
 }
 
+void populateDeviceStringWithName(void)
+{
+    extern BYTE * USB_SD_Ptr[];
+
+    unsigned char name[FLASH_NAME_LENGTH+1];    
+    UINT8 i;
+    
+    // Clear out our name array
+    for (i=0; i < FLASH_NAME_LENGTH+1; i++)
+    {
+        name[i] = 0x00;
+    }
+    
+    // We always read 16, knowing that any unused bytes will be set to zero
+    ReadFlash(FLASH_NAME_ADDRESS, FLASH_NAME_LENGTH, name);
+
+    // The EEB's name is now in the 'name' local variable as a straight string
+    // of bytes. We need to move it to the proper locations in the sd002
+    // USB string descriptor (which is in RAM now). But it needs to be a 
+    // unicode string, so we've got to skip every other byte.
+    // Since the FLASH copy of 'name' is padded with zeros and is always 16
+    // bytes long, we are safe to always copy 16 bytes over to the string
+    // descriptor. 
+    // Because sd002 is an anonymous structure without any names for its
+    // members, we are totally going to just hack this bad boy and jump
+    // into a known offset from the beginning of the structure.
+    // As of 2.5.5, we now not only update the Product string, but also the
+    // serial number string.
+    for (i=0; i < FLASH_NAME_LENGTH; i++)
+    {
+        // Only copy over valid ASCII characters. On the first invalid
+        // one, bail out.
+        if (name[i] <= 128 && name[i] >= 32)
+        {
+            *(USB_SD_Ptr[2] + 24 + (i*2)) = name[i];
+            *(USB_SD_Ptr[3] + 2 + (i*2)) = name[i];
+        }
+        else
+        {
+            break;
+        }
+    }
+    // Now update the string descriptor lengths based on how many characters
+    // we copied over from Flash
+    *(USB_SD_Ptr[2]) = 24 + (i * 2);
+    *(USB_SD_Ptr[3]) = 2 + (i * 2);
+}
+
+// ST command : Set Tag
+// "ST,<new name><CR>"
+// <new name> is a 0 to 16 character ASCII string.
+// This string gets saved in FLASH, and is returned by the "QT" command, as
+// well as being appended to the USB name that shows up in the OS
+void parse_ST_packet()
+{
+	unsigned char name[FLASH_NAME_LENGTH+1];
+    UINT8 bytes = 0;
+    UINT8 i;
+    
+    // Clear out our name array
+    for (i=0; i < FLASH_NAME_LENGTH+1; i++)
+    {
+        name[i] = 0x00;
+    }
+    
+    bytes = extract_string(name, FLASH_NAME_LENGTH);
+    
+    // We have reserved FLASH addresses 0xF800 to 0xFBFF (1024 bytes) for
+    // storing persistent variables like the EEB's name. Note that no wear-leveling
+    // is done, so it's not a good idea to change these values more than 10K times. :-)
+    
+    EraseFlash(FLASH_NAME_ADDRESS, FLASH_NAME_ADDRESS + 0x3FF);
+    
+    WriteBytesFlash(FLASH_NAME_ADDRESS, FLASH_NAME_LENGTH, name);
+    
+	print_ack();
+}
+
+// QT command : Query Tag
+// "QT<CR>"
+// Prints out the 'tag' that was set with the "ST" command previously, if any
+void parse_QT_packet()
+{
+    unsigned char name[FLASH_NAME_LENGTH+1];    
+    UINT8 i;
+    
+    // Clear out our name array
+    for (i=0; i < FLASH_NAME_LENGTH+1; i++)
+    {
+        name[i] = 0x00;
+    }
+    
+    // We always read 16, knowing that any unused bytes will be set to zero
+    ReadFlash(FLASH_NAME_ADDRESS, FLASH_NAME_LENGTH, name);
+    
+    // Only print it out if the first character is printable ASCII
+    if (name[0] >= 128 || name[0] < 32)
+    {
+    	printf ((rom char far *)"\r\n");
+    }
+    else
+    {
+    	printf ((rom char far *)"%s\r\n", name);
+    }
+    print_ack();
+}
+
+// Look at the string in g_RX_buf[]
+// Copy over all bytes from g_RX_buf_out into ReturnValue until you hit
+// a comma or a CR or you've copied over MaxBytes characters. 
+// Return the number of bytes copied. Advance g_RX_buf_out as you go.
+UINT8 extract_string (
+	unsigned char * ReturnValue, 
+	UINT8 MaxBytes
+)
+{
+    UINT8 bytes = 0;
+
+    // Always terminate the string
+    *ReturnValue = 0x00;
+    
+	// Check to see if we're already at the end
+	if (kCR == g_RX_buf[g_RX_buf_out])
+	{
+    	bitset (error_byte, kERROR_BYTE_MISSING_PARAMETER);
+		return (0);
+	}
+
+	// Check for comma where ptr points
+	if (g_RX_buf[g_RX_buf_out] != ',')
+	{
+		printf ((rom char far *)"!5 Err: Need comma next, found: '%c'\r\n", g_RX_buf[g_RX_buf_out]);
+		bitset (error_byte, kERROR_BYTE_PRINTED_ERROR);
+		return (0);
+	}
+
+    // Move to the next character
+    advance_RX_buf_out();
+
+    while(1)
+    {
+        // Check to see if we're already at the end
+        if (kCR == g_RX_buf[g_RX_buf_out] || ',' == g_RX_buf[g_RX_buf_out] || bytes >= MaxBytes)
+        {
+            return (bytes);
+        }
+
+        // Copy over a byte
+        *ReturnValue = g_RX_buf[g_RX_buf_out];
+        
+        // Move to the next character
+        advance_RX_buf_out();
+        
+        // Count this one
+        bytes++;
+        ReturnValue++;
+    }
+    
+    return(bytes);
+}
+
+
 // Look at the string pointed to by ptr
 // There should be a comma where ptr points to upon entry.
 // If not, throw a comma error.
-// If so, then look for up to three bytes after the
+// If so, then look for up to like a ton of bytes after the
 // comma for numbers, and put them all into one
-// byte (0-255). If the number is greater than 255, then
-// thow a range error.
+// unsigned long accumulator. 
 // Advance the pointer to the byte after the last number
 // and return.
 ExtractReturnType extract_number(

@@ -65,7 +65,7 @@
 
 #define bitset(var,bitno) ((var) |= (1 << (bitno)))
 #define bitclr(var,bitno) ((var) &= ~(1 << (bitno)))
-#define bittst(var,bitno) (var & ((1 << (bitno + 1)) >> 1))
+#define bittst(var,bitno) (var & (1 << bitno))
 
 
 // defines for the error_byte byte - each bit has a meaning
@@ -132,15 +132,20 @@ extern BOOL	g_ack_enable;
 extern volatile unsigned int g_RC_value[kRC_DATA_SIZE];			// Stores reload values for TMR0
 extern volatile tRC_state g_RC_state[kRC_DATA_SIZE];
 
+extern volatile unsigned long int gRCServoPoweroffCounterMS;
+extern volatile unsigned long int gRCServoPoweroffCounterReloadMS;
+
 /** P U B L I C  P R O T O T Y P E S *****************************************/
-void UserInit(void);
-void ProcessIO(void);
-void low_ISR(void);
-void high_ISR(void);
-ExtractReturnType extract_number(ExtractType Type, void * ReturnValue, unsigned char Required);
+void UserInit (void);
+void ProcessIO (void);
+void low_ISR (void);
+void high_ISR (void);
+ExtractReturnType extract_number (ExtractType Type, void * ReturnValue, unsigned char Required);
+UINT8 extract_string (unsigned char * ReturnValue, UINT8 MaxBytes);
 void print_ack (void);
-void SetPinTRISFromRPn(char Pin, char State);
-void SetPinLATFromRPn(char Pin, char State);
-void AnalogConfigure(unsigned char Channel, unsigned char Enable);
+void SetPinTRISFromRPn (char Pin, char State);
+void SetPinLATFromRPn (char Pin, char State);
+void AnalogConfigure (unsigned char Channel, unsigned char Enable);
+void populateDeviceStringWithName(void);
 
 #endif //UBW_H

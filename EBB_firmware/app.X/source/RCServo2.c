@@ -142,7 +142,7 @@ UINT8  g_servo2_RPn;
 The idea with RCServo2 is to use the ECCP2 module and timer 3.
 We divide time into 24ms periods. Inside each 24ms period, we
 can fire up to 8 RC servo's pulses (slots). Each pulse can be between
-0ms and 3ms long, controlled entierly by the ECCP2 hardware,
+0ms and 3ms long, controlled entirely by the ECCP2 hardware,
 so there is no jitter in the high time of the pulse.
 
 We want to go from 0ms to 3ms so we can accomodate RC servos
@@ -150,7 +150,7 @@ who need really short or really long pulses to reach the
 physical extremes of its motion.
 
 This RCServo2 method will only be available on the 18F45J50 based
-EggBotBoards, because it requires the PPS (perhipheral pin select)
+EggBotBoards, because it requires the PPS (peripheral pin select)
 facility to be possible.
 
 Timer3 will be configured to clock at Fosc/4 = 12MHz.
@@ -186,7 +186,7 @@ void RCServo2_Init(void)
 		gRC2Target[i] = 0;
 		gRC2Rate[i] = 0;
 	}
-	// Initalize the RPOR pointer
+	// Initialize the RPOR pointer
 	gRC2RPORPtr = &RPOR0;
 
 	// Set up TIMER3
@@ -209,19 +209,20 @@ void RCServo2_Init(void)
 	gRC2SlotMS = 3;
 
     // Start with some reasonable default values for min and max
-	g_servo2_max = 16000;           // max = down
-	g_servo2_min = 12000;           // min = up, 1ms, inital value
+	g_servo2_max = 15302;           // max = down (SC,5,15302)
+	g_servo2_min = 22565;           // min = up (SC,4,22565)
 
 	g_servo2_RPn = DEFAULT_EBB_SERVO_RPN;		// Always start out with RP4 as the output (just for this test version of code)
 	
 	g_servo2_rate_up = 400;
 	g_servo2_rate_down = 400;
 	process_SP(PEN_UP, 0);			// Start servo up
+  RCServoPowerIO = RCSERVO_POWER_OFF;
 }
 
-// Return the current channel that is assocated with the PPS output pin
+// Return the current channel that is associated with the PPS output pin
 // RPn. If there is no channel yet assigned for this RPn, then pick the
-// next avaialble one. If there are none available, then return channel 0
+// next available one. If there are none available, then return channel 0
 // (which is considered an error.)
 // Remember, channels are from 1 through 8 (Normally - can be increased with 
 // SC,8 command). Channel 0 is the 'error' channel.
@@ -315,73 +316,82 @@ UINT8 RCServo2_Move(
 	UINT16 Position,
 	UINT8  RPn,
 	UINT16 Rate,
-    UINT16 Delay
+  UINT16 Delay
 )
 {
-    UINT8 i;
-    UINT8 Channel;
+  UINT8 i;
+  UINT8 Channel;
 
-    // Get the channel that's already assigned to the RPn, or assign a new one
-    // if possible. If this returns zero, then do nothing as we're out of
-    // channels.
-    Channel = RCServo2_get_channel_from_RPn(RPn);
+  // Get the channel that's already assigned to the RPn, or assign a new one
+  // if possible. If this returns zero, then do nothing as we're out of
+  // channels.
+  Channel = RCServo2_get_channel_from_RPn(RPn);
 
-    // Error out if there were no available channels left
-    if (Channel == 0)
+  // Error out if there were no available channels left
+  if (Channel == 0)
+  {
+    return 0;
+  }
+
+  // If Duration is zero, then caller wants to shut down this channel
+  if (0 == Position)
+  {
+    // Turn off the PPS routing to the pin
+    *(gRC2RPORPtr + gRC2RPn[Channel - 1]) = 0;
+    gRC2Rate[Channel - 1] = 0;
+    gRC2Target[Channel - 1] = 0;
+    gRC2RPn[Channel - 1] = 0;
+    gRC2Value[Channel - 1] = 0;
+  }
+  else
+  {
+    // If we have a valid channel, and RPn, then make the move
+    if ((Channel - 1) < gRC2Slots && RPn <= 24)
     {
-        return 0;
+      // As a special case, if the pin is the same as the pin
+      // used for the solenoid, then turn off the solenoid function
+      // so that we can output PWM on that pin
+      if (RPn == PEN_UP_DOWN_RPN)
+      {
+        gUseSolenoid = FALSE;
+      }
+
+      // Is this the first time we've used this channel?
+      if (gRC2Value[Channel - 1] == 0)
+      {
+        // Make sure the pin is set as an output, or this won't do much good
+        SetPinTRISFromRPn(RPn, OUTPUT_PIN);
+
+        // For v2.1.5, found bug where if a pin is HIGH when we start doing
+        // RC output, the output is totally messed up. So make sure to set
+        // the pin low first.
+        SetPinLATFromRPn(RPn, 0);
+      }
+
+      // Wait until we have a free spot in the FIFO, and add our new
+      // command in
+      while(!FIFOEmpty)
+      ;
+      
+      // If the pin we're controlling is B1 (the normal servo output) then
+      // always make sure to turn power on and start the countdown timer
+      // for that servo port. (issue #144)
+      if (RPn == 4)
+      {
+        RCServoPowerIO = RCSERVO_POWER_ON;
+        gRCServoPoweroffCounterMS = gRCServoPoweroffCounterReloadMS;
+      }
+
+      // Now copy the values over into the FIFO element
+      CommandFIFO[0].Command = COMMAND_SERVO_MOVE;
+      CommandFIFO[0].DelayCounter = HIGH_ISR_TICKS_PER_MS * (UINT32)Delay;
+      CommandFIFO[0].ServoChannel = Channel;
+      CommandFIFO[0].ServoRPn = RPn;
+      CommandFIFO[0].ServoPosition = Position;
+      CommandFIFO[0].ServoRate = Rate;
+
+      FIFOEmpty = FALSE;
     }
-
-    // If Duration is zero, then caller wants to shut down this channel
-    if (0 == Position)
-    {
-        // Turn off the PPS routing to the pin
-        *(gRC2RPORPtr + gRC2RPn[Channel - 1]) = 0;
-        gRC2Rate[Channel - 1] = 0;
-        gRC2Target[Channel - 1] = 0;
-        gRC2RPn[Channel - 1] = 0;
-        gRC2Value[Channel - 1] = 0;
-    }
-    else
-    {
-        // If we have a valid channel, and RPn, then make the move
-        if ((Channel - 1) < gRC2Slots && RPn <= 24)
-        {
-            // As a speical case, if the pin is the same as the pin
-            // used for the solenoid, then turn off the solenoid function
-            // so that we can output PWM on that pin
-            if (RPn == PEN_UP_DOWN_RPN)
-            {
-                gUseSolenoid = FALSE;
-            }
-
-            // Is this the first time we've used this channel?
-            if (gRC2Value[Channel - 1] == 0)
-            {
-                // Make sure the pin is set as an output, or this won't do much good
-                SetPinTRISFromRPn(RPn, OUTPUT_PIN);
-
-                // For v2.1.5, found bug where if a pin is HIGH when we start doing
-                // RC output, the output is totally messed up. So make sure to set
-                // the pin low first.
-                SetPinLATFromRPn(RPn, 0);
-            }
-
-            // Wait until we have a free spot in the FIFO, and add our new
-            // command in
-            while(!FIFOEmpty)
-            ;
-
-            // Now copy the values over into the FIFO element
-            CommandFIFO[0].Command = COMMAND_SERVO_MOVE;
-            CommandFIFO[0].DelayCounter = HIGH_ISR_TICKS_PER_MS * (UINT32)Delay;
-            CommandFIFO[0].ServoChannel = Channel;
-            CommandFIFO[0].ServoRPn = RPn;
-            CommandFIFO[0].ServoPosition = Position;
-            CommandFIFO[0].ServoRate = Rate;
-
-            FIFOEmpty = FALSE;
-        }
 	}
-    return Channel;
+  return Channel;
 }
